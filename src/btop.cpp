@@ -27,6 +27,7 @@ tab-size = 4
 #include <mutex>
 #include <optional>
 #include <pthread.h>
+#include <langinfo.h>
 #include <span>
 #include <string_view>
 #ifdef __FreeBSD__
@@ -46,6 +47,7 @@ tab-size = 4
 #include <semaphore>
 
 #ifdef __APPLE__
+	#include <xlocale.h>
 	#include <CoreFoundation/CoreFoundation.h>
 	#include <mach-o/dyld.h>
 	#include <limits.h>
@@ -936,72 +938,108 @@ static auto configure_tty_mode(std::optional<bool> force_tty) {
 	init_config(cli.low_color, cli.filter);
 
 	//? Try to find and set a UTF-8 locale
-	if (std::setlocale(LC_ALL, "") != nullptr and not std::string_view { std::setlocale(LC_ALL, "") }.contains(";")
-	and str_to_upper(s_replace((string)std::setlocale(LC_ALL, ""), "-", "")).ends_with("UTF8")) {
-		Logger::debug("Using locale {}", std::locale().name());
-	}
-	else {
-		string found;
-		bool set_failure{};
-		for (const auto loc_env : array{"LANG", "LC_ALL", "LC_CTYPE"}) {
-			if (std::getenv(loc_env) != nullptr and str_to_upper(s_replace((string)std::getenv(loc_env), "-", "")).ends_with("UTF8")) {
-				found = std::getenv(loc_env);
-				if (std::setlocale(LC_ALL, found.c_str()) == nullptr) {
-					set_failure = true;
-					Logger::warning("Failed to set locale {} continuing anyway.", found);
+	{
+		if (std::setlocale(LC_ALL, "") != nullptr &&
+			str_to_upper(s_replace((string)nl_langinfo(CODESET), "-", ""))
+				.ends_with("UTF8")) {
+			Logger::debug("Using locale {}", std::locale().name());
+		} else {
+			constexpr auto is_utf_8 = [](const char *locale) -> bool {
+				locale_t loc = newlocale(LC_CTYPE_MASK, locale, (locale_t)0);
+
+				if (loc == (locale_t)0) {
+					return false;
+				}
+
+				if (str_to_upper(
+						s_replace(string(nl_langinfo_l(CODESET, loc)), "-", ""))
+						.ends_with("UTF8")) {
+					freelocale(loc);
+					return true;
+				}
+
+				freelocale(loc);
+				return false;
+			};
+
+			std::string loc_res{};
+			bool set_failure = false;
+			for (const auto loc_env : array{"LANG", "LC_ALL", "LC_CTYPE"}) {
+				if (auto f = std::getenv(loc_env);
+					f != nullptr && is_utf_8(f)) {
+					loc_res = f;
+					if (std::setlocale(LC_ALL, f) == nullptr) {
+						set_failure = true;
+						Logger::warning(
+							"Failed to set locale {} continuing anyway.", f);
+					}
 				}
 			}
-		}
-		if (found.empty()) {
-			if (setenv("LC_ALL", "", 1) == 0 and setenv("LANG", "", 1) == 0) {
-				try {
-					if (const auto loc = std::locale("").name(); not loc.empty() and loc != "*") {
-						for (auto& l : ssplit(loc, ';')) {
-							if (str_to_upper(s_replace(l, "-", "")).ends_with("UTF8")) {
-								found = l.substr(l.find('=') + 1);
-								if (std::setlocale(LC_ALL, found.c_str()) != nullptr) {
-									break;
+
+			if (loc_res.empty()) {
+				if (setenv("LC_ALL", "", 1) == 0 and
+					setenv("LANG", "", 1) == 0) {
+					try {
+						if (const auto loc = std::locale("").name();
+							not loc.empty() and loc != "*") {
+							for (auto &l : ssplit(loc, ';')) {
+								if (str_to_upper(s_replace(l, "-", ""))
+										.ends_with("UTF8")) {
+									loc_res = l.substr(l.find('=') + 1);
+									if (std::setlocale(LC_ALL,
+													   loc_res.c_str()) !=
+										nullptr) {
+										break;
+									}
 								}
 							}
 						}
+					} catch (...) {
+						loc_res.clear();
 					}
 				}
-				catch (...) { found.clear(); }
 			}
-		}
-	//
-	#ifdef __APPLE__
-		if (found.empty()) {
-			CFLocaleRef cflocale = CFLocaleCopyCurrent();
-			CFStringRef id_value = (CFStringRef)CFLocaleGetValue(cflocale, kCFLocaleIdentifier);
-			auto loc_id = CFStringGetCStringPtr(id_value, kCFStringEncodingUTF8);
-			CFRelease(cflocale);
-			std::string cur_locale = (loc_id != nullptr ? loc_id : "");
-			if (cur_locale.empty()) {
-				Logger::warning("No UTF-8 locale detected! Some symbols might not display correctly.");
+			#ifdef __APPLE__
+			if (loc_res.empty()) {
+				CFLocaleRef cflocale = CFLocaleCopyCurrent();
+				CFStringRef id_value = (CFStringRef)CFLocaleGetValue(
+					cflocale, kCFLocaleIdentifier);
+				auto loc_id =
+					CFStringGetCStringPtr(id_value, kCFStringEncodingUTF8);
+				CFRelease(cflocale);
+				std::string cur_locale = (loc_id != nullptr ? loc_id : "");
+
+				if (cur_locale.empty()) {
+					Logger::warning("No UTF-8 locale detected! Some symbols "
+									"might not display correctly.");
+				} else if (std::setlocale(
+							   LC_ALL, string(cur_locale + ".UTF-8").c_str()) !=
+						   nullptr) {
+					Logger::debug("Setting LC_ALL={}.UTF-8", cur_locale);
+				} else if (std::setlocale(LC_ALL, "en_US.UTF-8") != nullptr) {
+					Logger::debug("Setting LC_ALL=en_US.UTF-8");
+				} else {
+					Logger::warning(
+						"Failed to set macos locale, continuing anyway.");
+				}
 			}
-			else if (std::setlocale(LC_ALL, string(cur_locale + ".UTF-8").c_str()) != nullptr) {
-				Logger::debug("Setting LC_ALL={}.UTF-8", cur_locale);
+			#else
+			if (loc_res.empty() and cli.force_utf) {
+				Logger::warning("No UTF-8 locale detected! Forcing start with "
+								"--force-utf argument.");
+			} else if (loc_res.empty()) {
+				Global::exit_error_msg =
+					"No UTF-8 locale detected!\nUse --force-utf argument to "
+					"force start if you're sure your terminal can handle it.";
+				clean_quit(1);
 			}
-			else if(std::setlocale(LC_ALL, "en_US.UTF-8") != nullptr) {
-				Logger::debug("Setting LC_ALL=en_US.UTF-8");
+			#endif
+			else if (not set_failure) {
+				Logger::debug("Setting LC_ALL={}", loc_res);
 			}
-			else {
-				Logger::warning("Failed to set macos locale, continuing anyway.");
-			}
-		}
-	#else
-		if (found.empty() and cli.force_utf) {
-			Logger::warning("No UTF-8 locale detected! Forcing start with --force-utf argument.");
-		} else if (found.empty()) {
-			Global::exit_error_msg = "No UTF-8 locale detected!\nUse --force-utf argument to force start if you're sure your terminal can handle it.";
-			clean_quit(1);
-		}
-	#endif
-		else if (not set_failure) {
-			Logger::debug("Setting LC_ALL={}", found);
 		}
 	}
+
 
 	//? Initialize terminal and set options
 	if (not Term::init()) {
