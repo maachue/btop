@@ -976,6 +976,11 @@ static auto configure_tty_mode(std::optional<bool> force_tty) {
 
 	Logger::debug("LOCALE / CODESET: {} (C), {} (C++) / {}", std::setlocale(LC_ALL, nullptr), std::locale().name(), nl_langinfo(CODESET));
 
+	if (std::getenv("BTOP_MAACHUE_LOCALETEST") != nullptr) {
+		Global::exit_error_msg = fmt::format("LOCALE / CODESET: {} (C), {} (C++) / {}", std::setlocale(LC_ALL, nullptr), std::locale().name(), nl_langinfo(CODESET));
+		clean_quit(0);
+	}
+	
 	//? Initialize terminal and set options
 	if (not Term::init()) {
 		Global::exit_error_msg = "No tty detected!\nbtop++ needs an interactive shell to run.";
