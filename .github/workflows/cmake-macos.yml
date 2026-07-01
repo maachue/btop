@@ -61,6 +61,6 @@ jobs:
 
       - name: MacOS test
         run: |
-          brew install coreutils
-          gtimeout 5s ./build/btop -d
+          export BTOP_MAACHUE_LOCALETEST=1
+          ./build/btop -d
           cat ~/.local/state/btop.log # hope this work
