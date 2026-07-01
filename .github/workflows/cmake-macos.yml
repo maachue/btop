@@ -58,3 +58,8 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build
+
+      - name: MacOS test
+        run: |
+          timeout 5s ./build/btop -d
+          cat ~/.local/state/btop.log # hope this work
